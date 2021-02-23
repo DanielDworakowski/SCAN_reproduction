@@ -4,73 +4,95 @@ import torch.nn as nn
 from . import debug as db
 import torch.nn.functional as F
 from collections import OrderedDict
-
+from scanrepro import SimCLRModel
+import scancuda
 from torchvision import models
 import pytorch_lightning as pl
 
-class SIMCLRModel(nn.Module):
-
+class SCANModelPT(nn.Module):
     def __init__(
         self,
-        insize: int = 512,
-        hiddenSize: int = 128,
-        cosine_temp: float = 0.1,
+        model: SimCLRModel.SIMCLRModelPT,
+        in_size: int = 512,
+        n_classes: int = 10,
         **kwargs
     ):
         super().__init__()
-        self.resnet_feat = torch.nn.Sequential(*list(models.resnet18().children())[:-1])
-        self.cosine_temp = cosine_temp
-        self.nn = nn.Sequential(*[
-            nn.Linear(insize, hiddenSize),
-            nn.ReLU(inplace=True),
-            nn.Linear(hiddenSize, hiddenSize),
-        ])
+        self.model = model
+        self.nn = torch.nn.Sequential(
+            # torch.nn.Linear(in_size, in_size),
+            # torch.nn.ReLU(),
+            torch.nn.Linear(in_size, n_classes),
+            torch.nn.Softmax(dim=1)
+        )
+        self.softmax = nn.Softmax(dim = 1)
 
-    def forward_impl(self, x: torch.tensor):
+    def setSelfLabel(self):
+        self.nn = self.nn[:-1]
+
+    def forward_impl(self, x):
         bs = x.shape[0]
-        return self.nn(self.resnet_feat(x).view(bs, -1))
+        h = self.model.resnet_feat(x).view(bs, -1)
+        return self.nn(h)
 
     def forward(self, x):
         return self.forward_impl(x)
 
-    def cosine_similarity(self, z1, z2):
-        num = z1 @ z2.transpose(0,1)
-        norm_z1 = z1.norm(dim=-1)
-        norm_z2 = z2.norm(dim=-1).view(-1, 1)
-        sim = num / (norm_z1 * norm_z2 + 1e-9)
-        return sim
+    def entropyLoss(self, p, entropy_lambda):
+        p_mean = p.mean(0).clamp(min=1e-9)
+        log_p_mean = p_mean.log()
+        entropy = p_mean * log_p_mean
+        return -entropy_lambda * entropy.sum()
 
-    def simclr_loss(self, z):
-        num_samples = z.shape[0] // 2
+    def SCANLoss(self, p, p_neighbor, p_idx, p_idx_neighbor, nearest, entropy_lambda):
+        entropy = self.entropyLoss(p, entropy_lambda)
+        prob_grid = p @ p_neighbor.transpose(0, 1)
+        # prob_grid = p.view(-1, 1, p.shape[-1]) @ p_neighbor.view(-1, p.shape[-1], 1)
+        maskout = torch.zeros([*prob_grid.shape], device=prob_grid.device, dtype=torch.int32)
         #
-        # Cosine similarity between every example.
-        cosinesim = self.cosine_similarity(z, z)
-        # cosinesim.div_(self.cosine_temp)
-        cosinesim /= self.cosine_temp
+        # Create a mask with matched pairs.
+        scancuda.SCAN_NN_Mask_Fill(p_idx_neighbor, nearest, maskout)
+        dotloss = prob_grid
+        dotloss = dotloss.log()[maskout.bool()]
+        if dotloss.size() == 0:
+            db.printWarn('No matched neighbors were in the set')
+        dotloss = -dotloss.mean()
+        # db.printInfo(dotloss)
+        # db.printInfo(entropy)
+        if dotloss.isnan():
+            db.printInfo(prob_grid[maskout.bool()])
+        return dotloss - entropy, dotloss, entropy
+
+    def selfLabelLoss(self, p_raw):
+        p = self.softmax(p_raw)
+        p_max, max_idx = p.max(dim=1)
+        mask = p_max > 0.99
         #
-        # Numerical stability -- softmax is invariant to shift.
-        cosinesim -= cosinesim.max(-1)[0]
-        cosinesim = cosinesim.exp()
+        # Keep only the instances with prob > threshold.
+        p_raw = p_raw[mask]
+        max_idx = max_idx[mask]
         #
-        # Zero out all the diagonal elements.
-        mask = 1.0 - torch.eye(*cosinesim.shape, device=cosinesim.device, dtype=cosinesim.dtype)
-        cosinesim = cosinesim * mask
-        #
-        # Sum all samples at each row to get the denominator.
-        denom = torch.log(cosinesim.sum(-1))
-        #
-        # The postive samples are the diagonals of the upper right and lower left quadrants.
-        num = -torch.cat([cosinesim.diagonal(num_samples), cosinesim.diagonal(-num_samples)]).log_()
-        #
-        # The final loss is the mean of this sum.
-        loss = torch.mean(num + denom)
-        return loss
+        # Weights for cross-entropy.
+        idx, cnts = max_idx.unique(return_counts=True)
+        weights= 1/(cnts / max_idx.size(0))
+        sm_weights = weights[idx]
+        # db.printInfo(idx)
+        # db.printInfo(sm_weights)
+        # db.printTensor(p)
+        # db.printTensor(max_idx)
+        CE_loss = nn.functional.cross_entropy(p_raw, max_idx, weight=sm_weights, reduction='mean')
+        return CE_loss
 
 class SCANModel(pl.LightningModule):
 
     def __init__(
         self,
+        model: SimCLRModel.SimCLRModel,
+        n_classes: int = 10,
+        entropy_lambda: float = 5.,
         lr: float = 1e-4,
+        momentum: float = 0.9,
+        epochs_max: int = 500,
         b1: float = 0.5,
         b2: float = 0.999,
         weight_decay: float = 1e-4,
@@ -80,102 +102,82 @@ class SCANModel(pl.LightningModule):
         #
         # Access params via:
         # self.hparams.latent_dim
-        self.save_hyperparameters()
-        self.model = SIMCLRModel()
+        self.save_hyperparameters('n_classes', 'lr', 'b1', 'b2', 'weight_decay', 'entropy_lambda')
+        self.model = SCANModelPT(model.model, n_classes=n_classes)
+        self.training_step_impl = self.SCAN_training_step
 
-    def forward(self, x):
-        return self.model(x)
+
+    def forward(self, x, training):
+        if training:
+            bs = x.shape[0]
+            return self.model.resnet_feat(x).view(bs, -1)
+            # return self.model.foward_feat(x)
+        else:
+            raise NotImplementedError('Forward function not yet implemented')
+
+    def setSelfLabel(self):
+        self.training_step_impl = self.self_label_training_step
+        self.model.setSelfLabel()
 
     # def simCLRL(self, y_hat, y):
     #     return F.binary_cross_entropy(y_hat, y)
-
-    def training_step(self, batch, batch_idx):
-        imgs1, imgs2 = batch
-        imgs1, _ = imgs1
-        imgs2, _ = imgs2
-        # z1 = self.model(imgs1)
-        # z2 = self.model(imgs2)
-        imgs = torch.cat([imgs1, imgs2])
-        z = self.model(imgs)
-        loss = self.model.simclr_loss(z)
-        tqdm_dict = {'simclr_loss': loss}
-        self.log('simclr_loss', loss)
+    def self_label_training_step(self, batch, batch_idx):
+        imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
+        #
+        # All images are strongly augmented like said in the paper.
+        imgs = torch.cat([imgs, imgs_neighbor], 0)
+        probs = self.model(imgs)
+        loss = self.model.selfLabelLoss(probs)
+        self.log('self_label_loss', loss)
         output = OrderedDict({
             'loss': loss,
-            # 'progress_bar': tqdm_dict,
-            # 'log': tqdm_dict
         })
         return output
-        # # train generator
-        # if optimizer_idx == 0:
+    def SCAN_training_step(self, batch, batch_idx):
+        imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
+        imgs = torch.cat([imgs, imgs_neighbor], 0)
+        # idx = torch.cat([idx, idx_neighbor], 0)
+        # nearest = torch.cat([nearest, neighbors_neighbors], 0)
+        probs = self.model(imgs)
+        probs, probs_neighbor = torch.split(probs, probs.shape[0] // 2, 0)
+        loss, dotloss, entropy = self.model.SCANLoss(probs, probs_neighbor, idx, idx_neighbor, nearest, self.hparams.entropy_lambda)
+        self.log('loss', loss)
+        self.log('dotloss', dotloss)
+        self.log('entropy', entropy)
+        output = OrderedDict({
+            'loss': loss,
+        })
+        return output
 
-        #     # # generate images
-        #     # self.generated_imgs = self(z)
-
-        #     # # log sampled images
-        #     # sample_imgs = self.generated_imgs[:6]
-        #     # grid = torchvision.utils.make_grid(sample_imgs)
-        #     # self.logger.experiment.add_image('generated_images', grid, 0)
-
-        #     # # ground truth result (ie: all fake)
-        #     # # put on GPU because we created this tensor inside training_loop
-        #     # valid = torch.ones(imgs.size(0), 1)
-        #     # valid = valid.type_as(imgs)
-
-        #     # # adversarial loss is binary cross-entropy
-        #     # g_loss = self.adversarial_loss(self.discriminator(self(z)), valid)
-        #     # tqdm_dict = {'g_loss': g_loss}
-        #     # output = OrderedDict({
-        #     #     'loss': g_loss,
-        #     #     'progress_bar': tqdm_dict,
-        #     #     'log': tqdm_dict
-        #     # })
-        #     return output
-
-        # # train discriminator
-        # if optimizer_idx == 1:
-        #     # # Measure discriminator's ability to classify real from generated samples
-
-        #     # # how well can it label as real?
-        #     # valid = torch.ones(imgs.size(0), 1)
-        #     # valid = valid.type_as(imgs)
-
-        #     # real_loss = self.adversarial_loss(self.discriminator(imgs), valid)
-
-        #     # # how well can it label as fake?
-        #     # fake = torch.zeros(imgs.size(0), 1)
-        #     # fake = fake.type_as(imgs)
-
-        #     # fake_loss = self.adversarial_loss(
-        #     #     self.discriminator(self(z).detach()), fake)
-
-        #     # # discriminator loss is the average of these
-        #     # d_loss = (real_loss + fake_loss) / 2
-        #     # tqdm_dict = {'d_loss': d_loss}
-        #     # output = OrderedDict({
-        #     #     'loss': d_loss,
-        #     #     'progress_bar': tqdm_dict,
-        #     #     'log': tqdm_dict
-        #     # })
-        #     return output
+    def training_step(self, batch, batch_idx):
+        return self.training_step_impl(batch, batch_idx)
 
     def validation_step(self, batch, batch_idx):
-        return self.training_step(batch, batch_idx)
+        out = self.training_step(batch, batch_idx)
+        self.log('val_loss', out['loss'])
+        return {
+            'val_loss': out['loss'],
+            'loss': out['loss']
+            # 'log': {'val_loss': out['loss']}
+        }
+
+    def validation_epoch_end(self, outputs):
+        avg_val_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
+        self.log('avg_val_loss', avg_val_loss)
+        return {
+            'avg_val_loss': avg_val_loss,
+            'loss': avg_val_loss
+            # 'log': {'avg_val_loss': avg_val_loss}
+        }
 
     def configure_optimizers(self):
+        db.printWarn('Double check this!!')
         lr = self.hparams.lr
         b1 = self.hparams.b1
         b2 = self.hparams.b2
         wd = self.hparams.weight_decay
-
-        opt_m = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
-        return opt_m
+        opt = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
+        return opt
 
     def on_epoch_end(self):
         pass
-        # z = self.validation_z.type_as(self.generator.model[0].weight)
-
-        # # log sampled images
-        # sample_imgs = self(z)
-        # grid = torchvision.utils.make_grid(sample_imgs)
-        # self.logger.experiment.add_image('generated_images', grid, self.current_epoch)

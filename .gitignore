@@ -6,6 +6,8 @@ lightning_logs/
 # C extensions
 *.so
 *.tar.gz
+*.tgz
+checkpoints/
 .vscode/
 cifar-10-batches-py/
 

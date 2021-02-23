@@ -205,6 +205,13 @@ def augment_list():  # 16 oeprations and their ranges
 
     return l
 
+class CutoutStandAlone(object):
+
+    def __init__(self, v):
+        self.v = v
+
+    def __call__(self, img):
+        return Cutout(img, self.v)
 
 class Lighting(object):
     """Lighting noise(AlexNet - style PCA - based noise)"""
