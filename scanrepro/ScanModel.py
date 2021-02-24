@@ -113,7 +113,7 @@ class SCANModel(pl.LightningModule):
             return self.model.resnet_feat(x).view(bs, -1)
             # return self.model.foward_feat(x)
         else:
-            raise NotImplementedError('Forward function not yet implemented')
+            return self.model(x)
 
     def setSelfLabel(self):
         self.training_step_impl = self.self_label_training_step
@@ -135,9 +135,8 @@ class SCANModel(pl.LightningModule):
         return output
     def SCAN_training_step(self, batch, batch_idx):
         imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
+        db.printTensor(imgs)
         imgs = torch.cat([imgs, imgs_neighbor], 0)
-        # idx = torch.cat([idx, idx_neighbor], 0)
-        # nearest = torch.cat([nearest, neighbors_neighbors], 0)
         probs = self.model(imgs)
         probs, probs_neighbor = torch.split(probs, probs.shape[0] // 2, 0)
         loss, dotloss, entropy = self.model.SCANLoss(probs, probs_neighbor, idx, idx_neighbor, nearest, self.hparams.entropy_lambda)

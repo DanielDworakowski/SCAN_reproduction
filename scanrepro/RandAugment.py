@@ -96,22 +96,22 @@ def Posterize(img, v):  # [4, 8]
 
 
 def Contrast(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
+    # assert 0.1 <= v <= 1.9
     return PIL.ImageEnhance.Contrast(img).enhance(v)
 
 
 def Color(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
+    # assert 0.1 <= v <= 1.9
     return PIL.ImageEnhance.Color(img).enhance(v)
 
 
 def Brightness(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
+    # assert 0.1 <= v <= 1.9
     return PIL.ImageEnhance.Brightness(img).enhance(v)
 
 
 def Sharpness(img, v):  # [0.1,1.9]
-    assert 0.1 <= v <= 1.9
+    # assert 0.1 <= v <= 1.9
     return PIL.ImageEnhance.Sharpness(img).enhance(v)
 
 
@@ -190,17 +190,20 @@ def augment_list():  # 16 oeprations and their ranges
         # (Invert, 0, 1),
         (Rotate, 0, 30),
         (Solarize, 0, 256),
-        # (Posterize, 0, 4),
-        # (SolarizeAdd, 0, 110),
-        (Color, 0.1, 1.9),
-        (Contrast, 0.1, 1.9),
-        (Brightness, 0.1, 1.9),
-        (Sharpness, 0.1, 1.9),
-        (ShearX, 0., 0.3),
-        (ShearY, 0., 0.3),
+        # (Color, 0.1, 1.9),
+        (Color, 0.05, 0.95),
+        # (Contrast, 0.1, 1.9),
+        (Contrast, 0.05, 0.95),
+        # (Brightness, 0.1, 1.9),
+        (Brightness, 0.05, 0.95),
+        # (Sharpness, 0.1, 1.9),
+        (Sharpness, 0.05, 0.95),
+        (ShearX, 0., 0.1),
+        (ShearY, 0., 0.1),
         # (CutoutAbs, 0, 40),
         (TranslateX, 0., 0.1),
         (TranslateY, 0., 0.1),
+        (Posterize, 4, 8),
     ]
 
     return l
@@ -279,7 +282,8 @@ class RandAugment:
     def __call__(self, img):
         ops = random.choices(self.augment_list, k=self.n)
         for op, minval, maxval in ops:
-            val = (float(self.m) / 30) * float(maxval - minval) + minval
+            val = (random.random()) * float(maxval - minval) + minval
+            # val = (float(self.m) / 30) * float(maxval - minval) + minval
             img = op(img, val)
 
         return img

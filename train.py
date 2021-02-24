@@ -42,6 +42,7 @@ def train_SCAN(model: ScanModel.SCANModel, simclrmodel: SimCLRModel.SimCLRModel,
                                                     mode='min')
         trainer = pl.Trainer.from_argparse_args(args,
                                                 gpus=-1,
+                                                max_epochs=100,
                                                 sync_batchnorm=True,
                                                 check_val_every_n_epoch=10,
                                                 callbacks=[checkpoint_cb])
@@ -81,11 +82,6 @@ def cli_main():
 
     simclr_model = train_simclr(args).cuda()
 
-
-    # ------------
-    # data
-    # ------------
-
     # ------------
     # model
     # ------------
@@ -94,17 +90,6 @@ def cli_main():
     model = train_SCAN(model, simclr_model, args)
 
     train_self_label(model, args)
-    # ------------
-    # training
-    # ------------
-
-
-    # ------------
-    # testing
-    # ------------
-    result = trainer.test(dm)
-    print(result)
-
 
 if __name__ == '__main__':
     cli_main()

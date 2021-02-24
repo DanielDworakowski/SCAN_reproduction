@@ -5,7 +5,7 @@ import torchvision
 from torchvision.datasets.utils import download_and_extract_archive
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
-from .RandAugment import RandAugment, CutoutStandAlone
+from .RandAugment import CutoutDefault, RandAugment, CutoutStandAlone
 from .SimCLRModel import SimCLRModel
 from scanrepro import debug as db
 import pytorch_lightning as pl
@@ -25,8 +25,9 @@ transformSettings = {
     False:
         transforms.Compose([
             RandAugment(4, 9),
-            CutoutStandAlone(0.1),
+            # CutoutStandAlone(0.5),
             transforms.ToTensor(),
+            CutoutDefault(16),
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
         ]) # RandAugment training.
 }
