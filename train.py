@@ -14,17 +14,19 @@ def train_simclr(args):
         db.printInfo('Loaded model from checkpoint')
         model = model.load_from_checkpoint(checkpoint_path=args.load_simclr_checkpoint)
     else:
-        dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', simclr=True)
+        dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='simclr')
         checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='loss',
                                                     dirpath='./checkpoints/',
                                                     filename='simclr-{epoch:02d}-{val_loss:.2f}',
                                                     mode='min')
+        lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
         trainer = pl.Trainer.from_argparse_args(args,
-                                                max_epochs=1000,
+                                                max_epochs=500,
                                                 gpus=-1,
                                                 sync_batchnorm=True,
                                                 check_val_every_n_epoch=10,
-                                                callbacks=[checkpoint_cb])
+                                                callbacks=[checkpoint_cb,
+                                                            lr_monitor])
         trainer.fit(model, dm)
     return model
 
@@ -35,14 +37,14 @@ def train_SCAN(model: ScanModel.SCANModel, simclrmodel: SimCLRModel.SimCLRModel,
         db.printInfo(args.load_SCAN_checkpoint)
         model = model.load_from_checkpoint(checkpoint_path=args.load_SCAN_checkpoint, model=simclrmodel)
     else:
-        dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', simclr=False)
-        checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='loss',
+        dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='SCAN', batch_size=128)
+        checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='dotloss',
                                                     dirpath='./checkpoints/',
                                                     filename='SCAN-{epoch:02d}-{val_loss:.2f}',
                                                     mode='min')
         trainer = pl.Trainer.from_argparse_args(args,
                                                 gpus=-1,
-                                                max_epochs=100,
+                                                max_epochs=300,
                                                 sync_batchnorm=True,
                                                 check_val_every_n_epoch=10,
                                                 callbacks=[checkpoint_cb])
@@ -51,13 +53,14 @@ def train_SCAN(model: ScanModel.SCANModel, simclrmodel: SimCLRModel.SimCLRModel,
 
 def train_self_label(model: ScanModel.SCANModel, args):
     model.setSelfLabel()
-    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', simclr=False)
+    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='selflabel', batch_size=1000)
     checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='loss',
                                                 dirpath='./checkpoints/',
                                                 filename='SCAN_self_label-{epoch:02d}-{val_loss:.2f}',
                                                 mode='min')
     trainer = pl.Trainer.from_argparse_args(args,
                                             gpus=-1,
+                                            max_epochs=200,
                                             sync_batchnorm=True,
                                             check_val_every_n_epoch=10,
                                             callbacks=[checkpoint_cb])
@@ -65,7 +68,7 @@ def train_self_label(model: ScanModel.SCANModel, args):
 
 
 def cli_main():
-    pl.seed_everything(1234)
+    # pl.seed_everything(1234)
 
     # ------------
     # args
@@ -75,7 +78,7 @@ def cli_main():
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--load_simclr_checkpoint', type=str, default='')
     parser.add_argument('--load_SCAN_checkpoint', type=str, default='')
-    parser.add_argument('--knn', type=int, default=10)
+    parser.add_argument('--knn', type=int, default=15)
     parser.add_argument('--calculateNN', action='store_true')
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
@@ -86,7 +89,7 @@ def cli_main():
     # model
     # ------------
     model = ScanModel.SCANModel(simclr_model)
-    Dataloaders.get_knn_dataset(simclr_model, 'CIFAR10', args.knn, n_image_samples=10, force_load=args.calculateNN)
+    Dataloaders.get_knn_dataset(simclr_model, 'CIFAR10', args.knn, n_image_samples=20, force_load=args.calculateNN)
     model = train_SCAN(model, simclr_model, args)
 
     train_self_label(model, args)

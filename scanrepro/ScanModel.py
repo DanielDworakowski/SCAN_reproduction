@@ -20,12 +20,9 @@ class SCANModelPT(nn.Module):
         super().__init__()
         self.model = model
         self.nn = torch.nn.Sequential(
-            # torch.nn.Linear(in_size, in_size),
-            # torch.nn.ReLU(),
             torch.nn.Linear(in_size, n_classes),
             torch.nn.Softmax(dim=1)
         )
-        self.softmax = nn.Softmax(dim = 1)
 
     def setSelfLabel(self):
         self.nn = self.nn[:-1]
@@ -38,14 +35,18 @@ class SCANModelPT(nn.Module):
     def forward(self, x):
         return self.forward_impl(x)
 
-    def entropyLoss(self, p, entropy_lambda):
-        p_mean = p.mean(0).clamp(min=1e-9)
+    def entropyLoss(self, p):
+        p_mean = p.mean(0).clamp(min=1e-8)
         log_p_mean = p_mean.log()
         entropy = p_mean * log_p_mean
-        return -entropy_lambda * entropy.sum()
+        return -entropy.sum()
 
     def SCANLoss(self, p, p_neighbor, p_idx, p_idx_neighbor, nearest, entropy_lambda):
-        entropy = self.entropyLoss(p, entropy_lambda)
+        entropy = self.entropyLoss(p)
+        # prob_grid = p.view(-1, 1, p.shape[-1]) @ p_neighbor.view(-1, p.shape[-1], 1)
+        # ones = torch.ones_like(prob_grid)
+        # dotloss = F.binary_cross_entropy(prob_grid, ones)
+
         prob_grid = p @ p_neighbor.transpose(0, 1)
         # prob_grid = p.view(-1, 1, p.shape[-1]) @ p_neighbor.view(-1, p.shape[-1], 1)
         maskout = torch.zeros([*prob_grid.shape], device=prob_grid.device, dtype=torch.int32)
@@ -54,17 +55,11 @@ class SCANModelPT(nn.Module):
         scancuda.SCAN_NN_Mask_Fill(p_idx_neighbor, nearest, maskout)
         dotloss = prob_grid
         dotloss = dotloss.log()[maskout.bool()]
-        if dotloss.size() == 0:
-            db.printWarn('No matched neighbors were in the set')
         dotloss = -dotloss.mean()
-        # db.printInfo(dotloss)
-        # db.printInfo(entropy)
-        if dotloss.isnan():
-            db.printInfo(prob_grid[maskout.bool()])
-        return dotloss - entropy, dotloss, entropy
+        return dotloss - entropy_lambda * entropy, dotloss, entropy
 
-    def selfLabelLoss(self, p_raw):
-        p = self.softmax(p_raw)
+    def selfLabelLoss(self, p_raw, p_raw_tf):
+        p = F.softmax(p_raw, dim=1)
         p_max, max_idx = p.max(dim=1)
         mask = p_max > 0.99
         #
@@ -74,13 +69,10 @@ class SCANModelPT(nn.Module):
         #
         # Weights for cross-entropy.
         idx, cnts = max_idx.unique(return_counts=True)
+        sm_weights = torch.ones([p_raw.shape[-1]], device=p_raw.device)
         weights= 1/(cnts / max_idx.size(0))
-        sm_weights = weights[idx]
-        # db.printInfo(idx)
-        # db.printInfo(sm_weights)
-        # db.printTensor(p)
-        # db.printTensor(max_idx)
-        CE_loss = nn.functional.cross_entropy(p_raw, max_idx, weight=sm_weights, reduction='mean')
+        sm_weights[idx] = weights
+        CE_loss = nn.functional.cross_entropy(p_raw_tf[mask], max_idx, weight=sm_weights, reduction='mean')
         return CE_loss
 
 class SCANModel(pl.LightningModule):
@@ -93,7 +85,7 @@ class SCANModel(pl.LightningModule):
         lr: float = 1e-4,
         momentum: float = 0.9,
         epochs_max: int = 500,
-        b1: float = 0.5,
+        b1: float = 0.9,
         b2: float = 0.999,
         weight_decay: float = 1e-4,
         **kwargs
@@ -111,7 +103,6 @@ class SCANModel(pl.LightningModule):
         if training:
             bs = x.shape[0]
             return self.model.resnet_feat(x).view(bs, -1)
-            # return self.model.foward_feat(x)
         else:
             return self.model(x)
 
@@ -119,23 +110,22 @@ class SCANModel(pl.LightningModule):
         self.training_step_impl = self.self_label_training_step
         self.model.setSelfLabel()
 
-    # def simCLRL(self, y_hat, y):
-    #     return F.binary_cross_entropy(y_hat, y)
     def self_label_training_step(self, batch, batch_idx):
-        imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
+        imgs, labels, idx, _, imgs_tf, labels_neighbor, idx_neighbor, _ = batch
         #
         # All images are strongly augmented like said in the paper.
-        imgs = torch.cat([imgs, imgs_neighbor], 0)
+        imgs = torch.cat([imgs, imgs_tf], 0)
         probs = self.model(imgs)
-        loss = self.model.selfLabelLoss(probs)
+        probs, probs_tf = torch.split(probs, probs.shape[0] // 2, 0)
+        loss = self.model.selfLabelLoss(probs, probs_tf)
         self.log('self_label_loss', loss)
         output = OrderedDict({
             'loss': loss,
         })
         return output
+
     def SCAN_training_step(self, batch, batch_idx):
         imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
-        db.printTensor(imgs)
         imgs = torch.cat([imgs, imgs_neighbor], 0)
         probs = self.model(imgs)
         probs, probs_neighbor = torch.split(probs, probs.shape[0] // 2, 0)
@@ -145,6 +135,8 @@ class SCANModel(pl.LightningModule):
         self.log('entropy', entropy)
         output = OrderedDict({
             'loss': loss,
+            'dotloss': dotloss,
+            'entropy': entropy,
         })
         return output
 
@@ -153,12 +145,16 @@ class SCANModel(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         out = self.training_step(batch, batch_idx)
-        self.log('val_loss', out['loss'])
-        return {
-            'val_loss': out['loss'],
-            'loss': out['loss']
-            # 'log': {'val_loss': out['loss']}
-        }
+        ret = {
+                'val_loss': out['loss'],
+                'loss': out['loss'],
+                # 'log': {'val_loss': out['loss']}
+            }
+        if 'dotloss' in out:
+            self.log('val_loss_unweighted', out['dotloss'] - out['entropy'])
+            ret = {'val_loss': out['dotloss'] - out['entropy']}
+        self.log('val_loss', ret['val_loss'])
+        return ret
 
     def validation_epoch_end(self, outputs):
         avg_val_loss = torch.stack([x['val_loss'] for x in outputs]).mean()
@@ -170,7 +166,6 @@ class SCANModel(pl.LightningModule):
         }
 
     def configure_optimizers(self):
-        db.printWarn('Double check this!!')
         lr = self.hparams.lr
         b1 = self.hparams.b1
         b2 = self.hparams.b2

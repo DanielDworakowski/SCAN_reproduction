@@ -93,7 +93,7 @@ def cli_main():
 
     model = ScanModel.SCANModel(SimCLRModel.SimCLRModel())
     model = model.load_from_checkpoint(checkpoint_path=args.load_SCAN_checkpoint, model=SimCLRModel.SimCLRModel())
-    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', simclr=False)
+    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='selflabel')
     dm.setup()
     probs = []
     targets = []

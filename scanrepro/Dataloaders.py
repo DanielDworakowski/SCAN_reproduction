@@ -5,31 +5,60 @@ import torchvision
 from torchvision.datasets.utils import download_and_extract_archive
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader, random_split
-from .RandAugment import CutoutDefault, RandAugment, CutoutStandAlone
+from .RandAugment import CutoutDefault, RandAugment
 from .SimCLRModel import SimCLRModel
 from scanrepro import debug as db
 import pytorch_lightning as pl
 
 transformSettings = {
-    True:
+    'simclr':
         transforms.Compose([
             transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomApply(
                 [transforms.ColorJitter(0.4,0.4,0.4,0.1)],
-                p=0.5),
+                p=0.8),
             transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
         ]), # Simclr training.
-    False:
+    'SCAN':
+        # transforms.Compose([
+        #     transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+        #     transforms.RandomHorizontalFlip(p=0.5),
+        #     transforms.RandomApply(
+        #         [transforms.ColorJitter(0.4,0.4,0.4,0.1)],
+        #         p=0.8),
+        #     transforms.RandomGrayscale(p=0.2),
+        #     transforms.ToTensor(),
+        #     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
+        # ]), # Simclr training.
         transforms.Compose([
-            RandAugment(4, 9),
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomCrop(32),
+            # transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
+            RandAugment(4),
             # CutoutStandAlone(0.5),
             transforms.ToTensor(),
-            CutoutDefault(16),
-            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-        ]) # RandAugment training.
+            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+            CutoutDefault(1, 16),
+        ]), # RandAugment training.
+    'selflabel':
+        transforms.Compose([
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomCrop(32),
+            RandAugment(4),
+            # CutoutStandAlone(0.5),
+            transforms.ToTensor(),
+            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+            CutoutDefault(1, 16),
+        ]), # RandAugment training.
+    'default':
+        transforms.Compose([
+            # transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
+        ])
 }
 
 DatasetDict = {
@@ -37,10 +66,12 @@ DatasetDict = {
 }
 class SIMCLRDatasetWrapper(torch.utils.data.Dataset):
 
-    def __init__(self, dataset, returnIDX):
+    def __init__(self, dataset, returnIDX, transform=None):
         self.dataset = dataset
         self.getitemimpl = self.getItemNoIDX
         self.setReturnIDX(returnIDX)
+        self.transform = transform
+        assert transform is not None
 
     def __len__(self):
         return len(self.dataset)
@@ -50,23 +81,29 @@ class SIMCLRDatasetWrapper(torch.utils.data.Dataset):
             self.getitemimpl = self.getItemWithIDX
 
     def getItemNoIDX(self, idx):
-        aug1 = self.dataset[idx]
-        aug2 = self.dataset[idx]
-        return (aug1, aug2)
+        img1, data1 = self.dataset[idx]
+        aug1 = self.transform(img1)
+        img2, data2 = self.dataset[idx]
+        aug2 = self.transform(img2)
+        return ((aug1, data1), (aug2, data2))
 
     def getItemWithIDX(self, idx):
-        aug1 = self.dataset[idx]
-        aug2 = self.dataset[idx]
-        return (aug1, aug2, idx)
+        img1, data1 = self.dataset[idx]
+        aug1 = self.transform(img1)
+        img2, data2 = self.dataset[idx]
+        aug2 = self.transform(img2)
+        return ((aug1, data1), (aug2, data2), idx)
 
     def __getitem__(self, idx):
         return self.getitemimpl(idx)
 
 class SCANDatasetWrapper(torch.utils.data.Dataset):
 
-    def __init__(self, dataset: torch.utils.data.Dataset, nearest_neighbours: str = 'nn.tgz'):
+    def __init__(self, dataset: torch.utils.data.Dataset, nearest_neighbours: str = 'nn.tgz', transform=None):
         self.dataset = dataset
         self.nearest_neighbours = torch.load(nearest_neighbours)
+        self.transform = transform
+        assert transform is not None
 
     def __len__(self):
         return len(self.dataset)
@@ -78,7 +115,25 @@ class SCANDatasetWrapper(torch.utils.data.Dataset):
         nn_idx = nearest_neighbours[random.randint(1, len(nearest_neighbours)-1)]
         img_neighbor, target_neighbour = self.dataset[nn_idx]
         nearest_neighbours_neightbours = self.nearest_neighbours[nn_idx]
-        return (img, target, idx, nearest_neighbours, img_neighbor, target_neighbour, nn_idx, nearest_neighbours_neightbours)
+        return (self.transform(img), target, idx, nearest_neighbours, self.transform(img_neighbor), target_neighbour, nn_idx, nearest_neighbours_neightbours)
+
+class SelfTransformedWrapper(torch.utils.data.Dataset):
+
+    def __init__(self, dataset: torch.utils.data.Dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
+        self.idTransform = transformSettings['default']
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, idx):
+        img, target = self.dataset[idx]
+        img = self.idTransform(img)
+        img_aug, target_aug = self.dataset[idx]
+        img_aug = self.transform(img_aug)
+        return (img, target, idx, torch.tensor([]), img_aug, target_aug, idx, torch.tensor([]))
+
 class GenericDataLoader(pl.LightningDataModule):
 
     def __init__(self,
@@ -86,17 +141,17 @@ class GenericDataLoader(pl.LightningDataModule):
                 batch_size: int = 512,
                 num_workers: int = 8,
                 dataset_name: str = 'CIFAR10',
-                simclr: bool = False,
+                mode: str = 'simclr',
                 train_fraction: float = 1.):
         super().__init__()
         self.data_dir = data_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.train_fraction = train_fraction
-        self.simclr = simclr
+        self.mode = mode
         #
         # Transformations according to the SCAN paper.
-        self.transform = transformSettings[simclr]
+        self.transform = transformSettings[mode]
 
         # self.transform = transforms.Compose([
         #     transforms.ToTensor(),
@@ -117,24 +172,31 @@ class GenericDataLoader(pl.LightningDataModule):
             raise RuntimeError('Must specify a dataset.')
         # Assign train/val datasets for use in dataloaders
         if stage == 'fit' or stage is None:
-            dset_full = self.dset(self.data_dir, train=True, transform=self.transform, download=True)
-            self.dims = tuple(dset_full[0][0].shape)
-            if self.simclr:
-                dset_full = SIMCLRDatasetWrapper(dset_full, returnIDX)
-            else:
-                dset_full = SCANDatasetWrapper(dset_full)
-            self.train = dset_full
-            self.val = dset_full
+            # dset_full = self.dset(self.data_dir, train=True, transform=self.transform, download=True)
+            dset_full = self.dset(self.data_dir, train=True, download=True)
+            if self.mode == 'simclr':
+                self.train = SIMCLRDatasetWrapper(dset_full, returnIDX, transform=self.transform)
+                self.val = SIMCLRDatasetWrapper(dset_full, returnIDX, transform=transformSettings['default'])
+            elif self.mode == 'SCAN':
+                self.train = SCANDatasetWrapper(dset_full, transform=self.transform)
+                self.val = SCANDatasetWrapper(dset_full, transform=transformSettings['default'])
+            elif self.mode == 'selflabel':
+                self.train = SelfTransformedWrapper(dset_full, transform=self.transform)
+                self.val = SelfTransformedWrapper(dset_full, transform=transformSettings['default'])
+
+            self.dims = tuple(self.train[0][0][0].shape)
+            # self.train = dset_full
+            # self.val = dset_full
             if self.train_fraction < 1.:
                 train_length = int(self.train_fraction * len(dset_full))
                 val_length = len(dset_full) - train_length
                 self.train, self.val = random_split(dset_full, [train_length, val_length])
 
         # Assign test dataset for use in dataloader(s)
-        if stage == 'test' or stage is None:
-            self.test = self.dset(self.data_dir, train=False, transform=self.transform, download=True)
-            self.dims = tuple(self.test[0][0].shape)
-            self.test = SIMCLRDatasetWrapper(self.test, returnIDX)
+        # if stage == 'test' or stage is None:
+        #     self.test = self.dset(self.data_dir, train=False, transform=self.transform, download=True)
+        #     self.dims = tuple(self.test[0][0].shape)
+        #     self.test = SIMCLRDatasetWrapper(self.test, returnIDX)
 
     def train_dataloader(self):
         return DataLoader(self.train, batch_size=self.batch_size, num_workers=self.num_workers)
@@ -155,7 +217,7 @@ def get_knn_dataset(simclr_model: SimCLRModel,
     import pathlib
     if pathlib.Path(save_name).exists() and not force_load:
         return
-    dm = GenericDataLoader(dataset_name=dataset_name, train_fraction=1., simclr=True)
+    dm = GenericDataLoader(dataset_name=dataset_name, train_fraction=1., mode='simclr')
     dm.setup(returnIDX=True)
     dataset = dm.train_dataloader()
     #

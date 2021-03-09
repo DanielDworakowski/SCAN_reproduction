@@ -32,7 +32,9 @@ class SIMCLRModelPT(nn.Module):
 
     def forward_impl(self, x: torch.tensor):
         bs = x.shape[0]
-        return self.nn(self.resnet_feat(x).view(bs, -1))
+        h = self.resnet_feat(x).view(bs, -1)
+        # db.printInfo(self.simclr_loss(h))
+        return self.nn(h)
 
     def forward(self, x):
         return self.forward_impl(x)
@@ -105,7 +107,6 @@ class SimCLRModel(pl.LightningModule):
         imgs = torch.cat([imgs1, imgs2])
         z = self.model(imgs)
         loss = self.model.simclr_loss(z)
-        tqdm_dict = {'loss': loss}
         self.log('loss', loss)
         output = OrderedDict({
             'loss': loss,
