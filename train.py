@@ -25,6 +25,7 @@ def train_simclr(args):
                                                 gpus=-1,
                                                 sync_batchnorm=True,
                                                 check_val_every_n_epoch=10,
+                                                progress_bar_refresh_rate=5,
                                                 callbacks=[checkpoint_cb,
                                                             lr_monitor])
         trainer.fit(model, dm)
@@ -46,6 +47,7 @@ def train_SCAN(model: ScanModel.SCANModel, simclrmodel: SimCLRModel.SimCLRModel,
                                                 gpus=-1,
                                                 max_epochs=300,
                                                 sync_batchnorm=True,
+                                                progress_bar_refresh_rate=5,
                                                 check_val_every_n_epoch=10,
                                                 callbacks=[checkpoint_cb])
         trainer.fit(model, dm)
@@ -62,6 +64,7 @@ def train_self_label(model: ScanModel.SCANModel, args):
                                             gpus=-1,
                                             max_epochs=200,
                                             sync_batchnorm=True,
+                                            progress_bar_refresh_rate=5,
                                             check_val_every_n_epoch=10,
                                             callbacks=[checkpoint_cb])
     trainer.fit(model, dm)

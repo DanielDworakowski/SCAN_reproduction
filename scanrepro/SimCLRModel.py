@@ -20,6 +20,7 @@ class SIMCLRModelPT(nn.Module):
         super().__init__()
         self.resnet_feat = torch.nn.Sequential(*list(models.resnet18().children())[:-1])
         self.cosine_temp = cosine_temp
+        self.out_size = out_size
         self.nn = nn.Sequential(*[
             nn.Linear(in_size, in_size),
             nn.ReLU(inplace=True),
@@ -41,32 +42,31 @@ class SIMCLRModelPT(nn.Module):
 
     def cosine_similarity(self, z1, z2):
         num = z1 @ z2.transpose(0,1)
-        norm_z1 = z1.norm(dim=-1)
-        norm_z2 = z2.norm(dim=-1).view(-1, 1)
-        sim = num / (norm_z1 * norm_z2 + 1e-9)
-        return sim
+        return num
 
     def simclr_loss(self, z):
+        # torch.save(z, 'test.tgz')
         num_samples = z.shape[0] // 2
         #
         # Cosine similarity between every example.
+        z = torch.nn.functional.normalize(z, dim=-1)
         cosinesim = self.cosine_similarity(z, z)
-        # cosinesim.div_(self.cosine_temp)
         cosinesim /= self.cosine_temp
         #
         # Numerical stability -- softmax is invariant to shift.
         cosinesim -= cosinesim.max(-1)[0].detach()
-        cosinesim = cosinesim.exp()
+        cosinesim_exp = cosinesim.exp()
         #
         # Zero out all the diagonal elements.
-        mask = 1.0 - torch.eye(*cosinesim.shape, device=cosinesim.device, dtype=cosinesim.dtype)
-        cosinesim = cosinesim * mask
+        mask = 1.0 - torch.eye(*cosinesim_exp.shape, device=cosinesim_exp.device, dtype=cosinesim_exp.dtype)
+        cosinesim_exp = cosinesim_exp * mask
         #
         # Sum all samples at each row to get the denominator.
-        denom = torch.log(cosinesim.sum(-1))
+        denom = torch.log(cosinesim_exp.sum(-1))
         #
         # The postive samples are the diagonals of the upper right and lower left quadrants.
-        num = -torch.cat([cosinesim.diagonal(num_samples), cosinesim.diagonal(-num_samples)]).log_()
+        # num = -torch.cat([cosinesim.diagonal(num_samples), cosinesim.diagonal(-num_samples)]).log_()
+        num = -torch.cat([cosinesim.diagonal(num_samples), cosinesim.diagonal(-num_samples)])
         #
         # The final loss is the mean of this sum.
         loss = torch.mean(num + denom)
@@ -111,7 +111,18 @@ class SimCLRModel(pl.LightningModule):
         output = OrderedDict({
             'loss': loss,
         })
+        # db.printInfo(self.scheduler.last_epoch)
+        # db.printInfo(self.scheduler.T_max)
+        # db.printInfo(self.scheduler.get_lr())
         return output
+
+    def training_epoch_end(self, training_step_outputs):
+        # do something with all training_step outputs
+        #
+        # The scheduler is broken with setting the number of validation steps.
+        self.log('lr', self.scheduler.get_lr()[0])
+        self.scheduler.step()
+        # return result
 
     def validation_step(self, batch, batch_idx):
         out = self.training_step(batch, batch_idx)
@@ -138,9 +149,9 @@ class SimCLRModel(pl.LightningModule):
         eta_min = lr * 0.1 ** 3
         epochs = self.hparams.max_epochs
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs, eta_min=eta_min)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(opt, epochs, eta_min=eta_min)
         # opt = torch.optim.Adam(self.model.parameters(), lr=lr, betas=(b1, b2), weight_decay=wd)
-        return [opt], [scheduler]
+        return [opt]#, [self.scheduler]
 
 
     def on_epoch_end(self):

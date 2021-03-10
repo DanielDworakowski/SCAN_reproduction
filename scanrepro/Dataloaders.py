@@ -14,7 +14,7 @@ transformSettings = {
     'simclr':
         transforms.Compose([
             transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
-            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomHorizontalFlip(),
             transforms.RandomApply(
                 [transforms.ColorJitter(0.4,0.4,0.4,0.1)],
                 p=0.8),
@@ -220,10 +220,13 @@ def get_knn_dataset(simclr_model: SimCLRModel,
     dm = GenericDataLoader(dataset_name=dataset_name, train_fraction=1., mode='simclr')
     dm.setup(returnIDX=True)
     dataset = dm.train_dataloader()
+    # dataset = dm.val_dataloader()
+    # n_image_samples = 1
     #
     # What to do with the generated augmentations while this is being generated?
     # They had a very big increase in performance after false postives were removed from their set of KNN.
-    codes = torch.zeros(len(dm.train), simclr_model.hparams.in_size, device=simclr_model.device)
+    codes = torch.zeros(len(dm.train), 128, device=simclr_model.device)
+    # codes = torch.zeros(len(dm.train), simclr_model.hparams.in_size, device=simclr_model.device)
     db.printInfo(n_image_samples)
     for i in range(max(n_image_samples // 2, 1)):
         for batch in tqdm.tqdm(dataset, 'Image Code Generation %d/%d: ' % (i, n_image_samples//2)):
@@ -231,8 +234,10 @@ def get_knn_dataset(simclr_model: SimCLRModel,
             imgs1 = imgs1[0].to(simclr_model.device)
             imgs2 = imgs2[0].to(simclr_model.device)
             idx = idx.to(simclr_model.device)
-            code = simclr_model(imgs1, feature_extraction=True)
-            code2 = simclr_model(imgs2, feature_extraction=True)
+            # code = simclr_model(imgs1, feature_extraction=True)
+            # code2 = simclr_model(imgs2, feature_extraction=True)
+            code = torch.nn.functional.normalize(simclr_model(imgs1, feature_extraction=False), dim=1)
+            code2 =torch.nn.functional.normalize(simclr_model(imgs2, feature_extraction=False), dim=1)
             codes[idx] += code / n_image_samples
             codes[idx] += code2 / n_image_samples
     #
@@ -240,7 +245,8 @@ def get_knn_dataset(simclr_model: SimCLRModel,
     closest_idxes = []
     for img_idx in tqdm.tqdm(range(len(dm.train)), 'top-k image generation: '):
         code = codes[img_idx:img_idx+1]
-        distances = (codes - code).norm(dim=-1)
+        # distances = (codes - code).norm(dim=-1)
+        distances = torch.nn.functional.normalize(codes - code, dim=1)
         #
         # Take knn+1 neightbours since it is guarunteed to be closest to itself.
         _, closest_idx = distances.topk(k=knn+1, largest=False, sorted=True)
