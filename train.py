@@ -21,6 +21,7 @@ def train_simclr(args):
                                                     mode='min')
         lr_monitor = pl.callbacks.LearningRateMonitor(logging_interval='epoch')
         trainer = pl.Trainer.from_argparse_args(args,
+                                                accelerator='ddp',
                                                 max_epochs=500,
                                                 gpus=-1,
                                                 sync_batchnorm=True,
@@ -43,35 +44,44 @@ def train_SCAN(model: ScanModel.SCANModel, simclrmodel: SimCLRModel.SimCLRModel,
                                                     dirpath='./checkpoints/',
                                                     filename='SCAN-{epoch:02d}-{val_loss:.2f}',
                                                     mode='min')
+        from pytorch_lightning.plugins import DDPPlugin
+
         trainer = pl.Trainer.from_argparse_args(args,
                                                 gpus=-1,
-                                                max_epochs=300,
+                                                accelerator='ddp',
+                                                max_epochs=200,
                                                 sync_batchnorm=True,
                                                 progress_bar_refresh_rate=5,
-                                                check_val_every_n_epoch=10,
+                                                check_val_every_n_epoch=5,
+                                                # plugins=DDPPlugin(find_unused_parameters=True),
                                                 callbacks=[checkpoint_cb])
         trainer.fit(model, dm)
     return model
 
 def train_self_label(model: ScanModel.SCANModel, args):
     model.setSelfLabel()
-    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='selflabel', batch_size=1000)
-    checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='loss',
+    dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='selflabel', batch_size=500)
+    # checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='loss',
+    #                                             dirpath='./checkpoints/',
+    #                                             filename='SCAN_self_label-{epoch:02d}-{val_loss:.2f}',
+    #                                             mode='min')
+    checkpoint_cb = pl.callbacks.ModelCheckpoint(monitor='epoch',
                                                 dirpath='./checkpoints/',
                                                 filename='SCAN_self_label-{epoch:02d}-{val_loss:.2f}',
-                                                mode='min')
+                                                mode='max')
     trainer = pl.Trainer.from_argparse_args(args,
                                             gpus=-1,
                                             max_epochs=200,
+                                            accumulate_grad_batches=2, #for single GPU training
+                                            accelerator='ddp',
                                             sync_batchnorm=True,
                                             progress_bar_refresh_rate=5,
                                             check_val_every_n_epoch=10,
                                             callbacks=[checkpoint_cb])
     trainer.fit(model, dm)
 
-
 def cli_main():
-    # pl.seed_everything(1234)
+    pl.seed_everything(1337)
 
     # ------------
     # args
@@ -81,7 +91,7 @@ def cli_main():
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--load_simclr_checkpoint', type=str, default='')
     parser.add_argument('--load_SCAN_checkpoint', type=str, default='')
-    parser.add_argument('--knn', type=int, default=15)
+    parser.add_argument('--knn', type=int, default=20)
     parser.add_argument('--calculateNN', action='store_true')
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()

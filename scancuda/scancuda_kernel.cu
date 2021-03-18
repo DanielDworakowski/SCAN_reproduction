@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 #include <assert.h>
 #include <iostream>
+#include <c10/cuda/CUDAStream.h>
 
 // namespace {
 __global__ void SCAN_NN_Mask_Fill_cuda_kernel(
@@ -45,7 +46,9 @@ void SCAN_NN_Mask_Fill_cuda(
     assert(p_idx.size(0) == output_mask.size(0));
     assert(p_idx.size(0) == output_mask.size(1));
 
-    SCAN_NN_Mask_Fill_cuda_kernel<<<blocks, threadsPerBlock>>>(
+    auto stream = at::cuda::getCurrentCUDAStream(p_idx.device().index());
+
+    SCAN_NN_Mask_Fill_cuda_kernel<<<blocks, threadsPerBlock, 0, stream>>>(
         p_idx.packed_accessor<int64_t,1,torch::RestrictPtrTraits,size_t>(),
         nearest_neighbors.packed_accessor<int64_t,2,torch::RestrictPtrTraits,size_t>(),
         output_mask.packed_accessor<int32_t,2,torch::RestrictPtrTraits,size_t>());

@@ -93,14 +93,17 @@ def cli_main():
 
     model = ScanModel.SCANModel(SimCLRModel.SimCLRModel())
     model = model.load_from_checkpoint(checkpoint_path=args.load_SCAN_checkpoint, model=SimCLRModel.SimCLRModel())
+    model = model.cuda()
     dm = Dataloaders.GenericDataLoader(dataset_name='CIFAR10', mode='selflabel')
     dm.setup()
     probs = []
     targets = []
     # batchidx = 0
-    for batch in tqdm.tqdm(dm.train_dataloader()):
+    for batch in tqdm.tqdm(dm.val_dataloader()):
         imgs, labels, idx, nearest, imgs_neighbor, labels_neighbor, idx_neighbor, neighbors_neighbors = batch
         targets.append(labels)
+        imgs = imgs.cuda()
+
         probs.append(model(imgs, training=False))
         # batchidx+=1
         # if batchidx % 3 == 0:

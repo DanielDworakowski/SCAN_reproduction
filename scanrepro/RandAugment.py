@@ -122,7 +122,6 @@ class CutoutDefault(object):
     def __init__(self, n_holes, length, random=False):
         self.n_holes = n_holes
         self.length = length
-        self.random = random
 
     def __call__(self, img):
         h = img.size(1)

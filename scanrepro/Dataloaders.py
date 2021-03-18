@@ -12,6 +12,7 @@ import pytorch_lightning as pl
 
 transformSettings = {
     'simclr':
+        # Simclr training.
         transforms.Compose([
             transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
             transforms.RandomHorizontalFlip(),
@@ -21,29 +22,19 @@ transformSettings = {
             transforms.RandomGrayscale(p=0.2),
             transforms.ToTensor(),
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-        ]), # Simclr training.
+        ]),
     'SCAN':
-        # transforms.Compose([
-        #     transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
-        #     transforms.RandomHorizontalFlip(p=0.5),
-        #     transforms.RandomApply(
-        #         [transforms.ColorJitter(0.4,0.4,0.4,0.1)],
-        #         p=0.8),
-        #     transforms.RandomGrayscale(p=0.2),
-        #     transforms.ToTensor(),
-        #     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-        # ]), # Simclr training.
+        # RandAugment training.
         transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomCrop(32),
-            # transforms.RandomResizedCrop(32, scale=(0.2, 1.)),
             RandAugment(4),
-            # CutoutStandAlone(0.5),
             transforms.ToTensor(),
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
             CutoutDefault(1, 16),
-        ]), # RandAugment training.
+        ]),
     'selflabel':
+        # RandAugment training.
         transforms.Compose([
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.RandomCrop(32),
@@ -52,7 +43,7 @@ transformSettings = {
             transforms.ToTensor(),
             transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]),
             CutoutDefault(1, 16),
-        ]), # RandAugment training.
+        ]),
     'default':
         transforms.Compose([
             # transforms.RandomHorizontalFlip(),
@@ -101,7 +92,7 @@ class SCANDatasetWrapper(torch.utils.data.Dataset):
 
     def __init__(self, dataset: torch.utils.data.Dataset, nearest_neighbours: str = 'nn.tgz', transform=None):
         self.dataset = dataset
-        self.nearest_neighbours = torch.load(nearest_neighbours)
+        self.nearest_neighbours = torch.load(nearest_neighbours).squeeze(1)
         self.transform = transform
         assert transform is not None
 
@@ -110,9 +101,9 @@ class SCANDatasetWrapper(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         img, target = self.dataset[idx]
-        nearest_neighbours = self.nearest_neighbours[idx]
-        # nn_idx = torch.random.choice(nearest_neighbours[1:])
-        nn_idx = nearest_neighbours[random.randint(1, len(nearest_neighbours)-1)]
+        nearest_neighbours = self.nearest_neighbours[idx].squeeze()
+        nn_idx = nearest_neighbours[random.randint(0, len(nearest_neighbours)-1)]
+        # nn_idx = nearest_neighbours[random.randint(1, len(nearest_neighbours)-1)]
         img_neighbor, target_neighbour = self.dataset[nn_idx]
         nearest_neighbours_neightbours = self.nearest_neighbours[nn_idx]
         return (self.transform(img), target, idx, nearest_neighbours, self.transform(img_neighbor), target_neighbour, nn_idx, nearest_neighbours_neightbours)
@@ -145,27 +136,19 @@ class GenericDataLoader(pl.LightningDataModule):
                 train_fraction: float = 1.):
         super().__init__()
         self.data_dir = data_dir
-        self.batch_size = batch_size
-        self.num_workers = num_workers
+        self.batch_size = batch_size // torch.cuda.device_count()
+        self.num_workers = num_workers // torch.cuda.device_count()
         self.train_fraction = train_fraction
         self.mode = mode
         #
         # Transformations according to the SCAN paper.
         self.transform = transformSettings[mode]
-
-        # self.transform = transforms.Compose([
-        #     transforms.ToTensor(),
-        #     transforms.Normalize([0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010])
-        # ])
-
         self.dset = DatasetDict[dataset_name]
         if dataset_name not in DatasetDict:
             raise ValueError('Dataset provided not in dataset dict')
 
     def prepare_data(self):
         pass
-        # self.dset(self.data_dir, train=True, download=True)
-        # self.dset(self.data_dir, train=False, download=True)
 
     def setup(self, stage=None, returnIDX=False):
         if self.dset is None:
@@ -185,8 +168,6 @@ class GenericDataLoader(pl.LightningDataModule):
                 self.val = SelfTransformedWrapper(dset_full, transform=transformSettings['default'])
 
             self.dims = tuple(self.train[0][0][0].shape)
-            # self.train = dset_full
-            # self.val = dset_full
             if self.train_fraction < 1.:
                 train_length = int(self.train_fraction * len(dset_full))
                 val_length = len(dset_full) - train_length
@@ -221,35 +202,34 @@ def get_knn_dataset(simclr_model: SimCLRModel,
     dm.setup(returnIDX=True)
     dataset = dm.train_dataloader()
     # dataset = dm.val_dataloader()
-    # n_image_samples = 1
     #
     # What to do with the generated augmentations while this is being generated?
     # They had a very big increase in performance after false postives were removed from their set of KNN.
     codes = torch.zeros(len(dm.train), 128, device=simclr_model.device)
-    # codes = torch.zeros(len(dm.train), simclr_model.hparams.in_size, device=simclr_model.device)
-    db.printInfo(n_image_samples)
     for i in range(max(n_image_samples // 2, 1)):
         for batch in tqdm.tqdm(dataset, 'Image Code Generation %d/%d: ' % (i, n_image_samples//2)):
             imgs1, imgs2, idx = batch
             imgs1 = imgs1[0].to(simclr_model.device)
             imgs2 = imgs2[0].to(simclr_model.device)
             idx = idx.to(simclr_model.device)
-            # code = simclr_model(imgs1, feature_extraction=True)
-            # code2 = simclr_model(imgs2, feature_extraction=True)
             code = torch.nn.functional.normalize(simclr_model(imgs1, feature_extraction=False), dim=1)
             code2 =torch.nn.functional.normalize(simclr_model(imgs2, feature_extraction=False), dim=1)
             codes[idx] += code / n_image_samples
             codes[idx] += code2 / n_image_samples
+    torch.save(codes, 'codes.tgz')
+    # codes = torch.load('codes.tgz')
+    codes = torch.nn.functional.normalize(codes, dim=1)
     #
     # Now iterating over the dataset find the top-k closest samples for each image index.
     closest_idxes = []
     for img_idx in tqdm.tqdm(range(len(dm.train)), 'top-k image generation: '):
         code = codes[img_idx:img_idx+1]
+        distances = code @ codes.T
         # distances = (codes - code).norm(dim=-1)
-        distances = torch.nn.functional.normalize(codes - code, dim=1)
         #
         # Take knn+1 neightbours since it is guarunteed to be closest to itself.
-        _, closest_idx = distances.topk(k=knn+1, largest=False, sorted=True)
+        val, closest_idx = distances.topk(k=knn+1, largest=True, sorted=True)
+        # _, closest_idx = distances.topk(k=knn+1, largest=False, sorted=True)
         closest_idxes.append(closest_idx.cpu().unsqueeze(0))
     closest_idxes = torch.cat(closest_idxes, 0)
     torch.save(closest_idxes, save_name)

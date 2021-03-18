@@ -12,7 +12,7 @@ if __name__ == '__main__':
     pbar = tqdm.tqdm(dataset)
     for batch in pbar:
         img, label, idx, nearest, _, _, _, _ = batch
-        for nearest_idx in nearest[1:]:
+        for nearest_idx in nearest[1:2]:
             _, label_neighor, _, _, _, _, _, _ = dataset[nearest_idx]
             n_correct += (label_neighor == label)
             total_cnt += 1

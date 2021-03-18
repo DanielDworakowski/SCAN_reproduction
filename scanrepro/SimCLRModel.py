@@ -5,7 +5,7 @@ from . import debug as db
 import torch.nn.functional as F
 from collections import OrderedDict
 
-from torchvision import models
+from . import scancifar_resnet as models
 import pytorch_lightning as pl
 
 class SIMCLRModelPT(nn.Module):
@@ -18,7 +18,8 @@ class SIMCLRModelPT(nn.Module):
         **kwargs
     ):
         super().__init__()
-        self.resnet_feat = torch.nn.Sequential(*list(models.resnet18().children())[:-1])
+        # self.resnet_feat = torch.nn.Sequential(*list(models.resnet18().children())[:-1]) # For the torchvision model.
+        self.resnet_feat = models.resnet18()
         self.cosine_temp = cosine_temp
         self.out_size = out_size
         self.nn = nn.Sequential(*[
@@ -33,8 +34,7 @@ class SIMCLRModelPT(nn.Module):
 
     def forward_impl(self, x: torch.tensor):
         bs = x.shape[0]
-        h = self.resnet_feat(x).view(bs, -1)
-        # db.printInfo(self.simclr_loss(h))
+        h = self.resnet_feat(x)
         return self.nn(h)
 
     def forward(self, x):
@@ -120,7 +120,7 @@ class SimCLRModel(pl.LightningModule):
         # do something with all training_step outputs
         #
         # The scheduler is broken with setting the number of validation steps.
-        self.log('lr', self.scheduler.get_lr()[0])
+        self.log('lr', self.scheduler.get_last_lr()[0])
         self.scheduler.step()
         # return result
 
